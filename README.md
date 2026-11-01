@@ -3,8 +3,8 @@
 ![](https://i.postimg.cc/W4HnKJXs/screenshot-14.png)
 
 # Installation
-1. Download: [LtMAO-hai.zip](https://github.com/tarngaina/LtMAO/archive/refs/heads/hai.zip)
-2. Extract: `LtMAO-hai.zip`
+1. Download: [LtMAO-ritobin-update.zip](https://github.com/BACKSTAB44/LtMAO/archive/refs/heads/ritobin-update.zip)
+2. Extract: `LtMAO-ritobin-update.zip`
 3. Run `LtMAO-hai/start.bat`
 
 # Updates

@@ -801,5 +801,5 @@ def bin_to_text(bin_path, text_path=None, hashtables=None):
     bin = pyRitoFile.bin.BIN().read(bin_path)
     if hashtables != None:
         bin.un_hash(hashtables)
-    with pyRitoFile.stream.StringStream.writer(text_path) as ss:
+    with open(text_path, 'w', encoding='utf-8', newline='\n') as ss:
         ss.write(Writer(bin).write_bin(0))

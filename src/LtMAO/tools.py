@@ -1,4 +1,4 @@
-import subprocess, math
+import subprocess, math, os
 from LtMAO import lepath
 from PIL import Image
 
@@ -191,49 +191,187 @@ class WWiseConsole:
         return p
     
 class RITOBIN:
-    local_file = './res/tools/ritobin_cli.exe'
+    # LeagueToolkit ritobin-tools v0.2.3 replaces the older ritobin_cli.exe.
+    # v0.2.3 supports 8-byte BIN Hash values and the legacy .py text extension.
+    local_file = './res/tools/ritobin-tools.exe'
+
+    @staticmethod
+    def _is_text_input(input_file, output_file):
+        lower = input_file.lower()
+        if lower.endswith(('.py', '.rito', '.ritobin')):
+            return True
+        try:
+            with open(input_file, 'rb') as stream:
+                magic = stream.read(4)
+            if magic in (b'PROP', b'PTCH'):
+                return False
+        except OSError:
+            pass
+        # For a not-yet-created path (useful for command planning/tests), infer
+        # direction from the requested output extension.
+        return not output_file.lower().endswith(('.py', '.rito', '.ritobin'))
+
+    @staticmethod
+    def build_commands(file_pairs, dir_hashes=None):
+        """Build ritobin-tools commands while preserving every requested output path.
+
+        Conventional pairs are batched into one CLI call. Pairs with custom
+        output names use an explicit --output argument and their own process.
+        """
+        import os
+
+        if len(file_pairs) % 2:
+            raise ValueError('RITOBIN.run expects input/output file pairs.')
+
+        executable = lepath.abs(RITOBIN.local_file)
+        global_args = ['--hashtable', lepath.abs(dir_hashes)] if dir_hashes else []
+        batches = {}
+        custom = []
+        text_extensions = ('.py', '.rito', '.ritobin')
+
+        for index in range(0, len(file_pairs), 2):
+            input_file = file_pairs[index]
+            output_file = file_pairs[index + 1]
+            output_lower = output_file.lower()
+            is_text_input = RITOBIN._is_text_input(input_file, output_file)
+
+            if is_text_input:
+                if not input_file.lower().endswith(text_extensions):
+                    custom.append((input_file, output_file, 'to_bin', None))
+                    continue
+                source_extension = next(
+                    ext for ext in text_extensions if input_file.lower().endswith(ext)
+                )
+                default_output = input_file[:-len(source_extension)] + '.bin'
+                if (output_lower.endswith('.bin') and
+                        os.path.normcase(os.path.abspath(default_output)) ==
+                        os.path.normcase(os.path.abspath(output_file))):
+                    batches.setdefault(('to_bin', None), []).append(input_file)
+                else:
+                    custom.append((input_file, output_file, 'to_bin', None))
+            else:
+                output_extension = next(
+                    (ext[1:] for ext in text_extensions if output_lower.endswith(ext)),
+                    'py',
+                )
+                if input_file.lower().endswith('.bin'):
+                    default_output = input_file[:-4] + '.' + output_extension
+                else:
+                    default_output = None
+                if (default_output is not None and
+                        os.path.normcase(os.path.abspath(default_output)) ==
+                        os.path.normcase(os.path.abspath(output_file))):
+                    batches.setdefault(('to_text', output_extension), []).append(input_file)
+                else:
+                    custom.append((input_file, output_file, 'to_text', output_extension))
+
+        commands = []
+        for (direction, extension), inputs in batches.items():
+            command = [executable, *global_args, 'convert', *inputs]
+            if direction == 'to_bin':
+                command.extend(('--to', 'bin'))
+            else:
+                command.extend(('--ext', extension))
+            commands.append(command)
+
+        for input_file, output_file, direction, extension in custom:
+            command = [executable, *global_args, 'convert', input_file]
+            if direction == 'to_bin':
+                command.extend(('--to', 'bin'))
+            else:
+                command.extend(('--ext', extension))
+            command.extend(('--output', output_file))
+            commands.append(command)
+
+        return commands
 
     @staticmethod
     def run(file_pairs, dir_hashes=None):
-        sub_len = 0
-        len_pair = len(file_pairs)
-        cur = 0
-        left = 0
-        right = 0
-        ps = []
-        while cur < len_pair:
-            inp = file_pairs[cur]
-            out = file_pairs[cur+1]
-            sub_len += len(inp) + len(out)
-            if sub_len > 30000:
-                right = cur+2
+        """Use LtMAO's original typed Writer for BIN-to-text; use v0.2.3 for text-to-BIN.
 
-                sub_pairs = file_pairs[left:right]
-                print(f'ritobin: Start: Process {len(sub_pairs) // 2} files.')
-                cmds = [lepath.abs(RITOBIN.local_file)]
-                cmds.append('--file-pairs')
-                cmds.extend(file_pairs[left:right])
-                if dir_hashes:
-                    cmds.extend(('--dir-hashes', dir_hashes))
-                ps.append(subprocess.Popen(
-                    cmds, creationflags=subprocess.CREATE_NO_WINDOW,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-                ))
-                
-                sub_len = 0
-                left = right
-            cur += 2
-        if right < len_pair:
-            sub_pairs = file_pairs[right:len_pair]
-            print(f'ritobin: Start: Process {len(sub_pairs) // 2} files.')
-            cmds = [lepath.abs(RITOBIN.local_file)]
-            cmds.append('--file-pairs')
-            cmds.extend(sub_pairs)
+        The original Writer formats each BIN value type separately. In particular,
+        LIST values are vertical while VEC2/VEC3/VEC4/RGBA values remain inline.
+        """
+        if not file_pairs:
+            return
+        if len(file_pairs) % 2:
+            raise ValueError('RITOBIN.run expects input/output file pairs.')
+
+        bin_to_text_pairs = []
+        text_to_bin_pairs = []
+        text_extensions = ('.py', '.rito', '.ritobin')
+
+        for index in range(0, len(file_pairs), 2):
+            input_file = file_pairs[index]
+            output_file = file_pairs[index + 1]
+            is_binary_input = not RITOBIN._is_text_input(input_file, output_file)
+            if (is_binary_input
+                    and output_file.lower().endswith(text_extensions)):
+                bin_to_text_pairs.extend((input_file, output_file))
+            else:
+                text_to_bin_pairs.extend((input_file, output_file))
+
+        failures = []
+
+        # Keep BIN-to-text on LtMAO's own Python implementation. This is the
+        # formatting path used before v3, now backed by the v2 64-bit Hash reader.
+        if bin_to_text_pairs:
+            from LtMAO import hash_helper, ritobin
+            hash_tables = None
             if dir_hashes:
-                cmds.extend(('--dir-hashes', dir_hashes))
-            ps.append(subprocess.Popen(
-                cmds, creationflags=subprocess.CREATE_NO_WINDOW,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-            ))
-        for p in ps:
-            p.wait()
+                # The old ritobin_cli.exe loaded all six custom CDragon tables
+                # from this directory. Load the same tables for BIN.un_hash().
+                hash_helper.CustomHashes.read_all_hashes()
+                hash_tables = hash_helper.Storage.hashtables
+
+            for index in range(0, len(bin_to_text_pairs), 2):
+                input_file = bin_to_text_pairs[index]
+                output_file = bin_to_text_pairs[index + 1]
+                print(f'ritobin: Start: {input_file} -> {output_file}')
+                try:
+                    output_dir = os.path.dirname(os.path.abspath(output_file))
+                    if output_dir:
+                        os.makedirs(output_dir, exist_ok=True)
+                    ritobin.bin_to_text(input_file, output_file, hash_tables)
+                    print(f'ritobin: Finish: {input_file} -> {output_file}')
+                except Exception as exc:
+                    print(f'ritobin: Error: {input_file}: {exc}')
+                    failures.append((input_file, output_file, exc))
+
+        # Text-to-BIN remains on the official converter, preserving the tested
+        # 64-bit hash parser/writer and its non-zero-exit diagnostics.
+        if text_to_bin_pairs:
+            commands = RITOBIN.build_commands(text_to_bin_pairs, dir_hashes)
+            for command in commands:
+                print(f'ritobin: Start: {command[-1] if command else "conversion"}')
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                    )
+                except OSError as exc:
+                    print(f'ritobin: Error: Could not start converter: {exc}')
+                    failures.append((command, None, exc))
+                    continue
+
+                if process.stdout is not None:
+                    for raw_line in process.stdout:
+                        if isinstance(raw_line, bytes):
+                            line = raw_line.decode('utf-8', errors='replace').rstrip()
+                        else:
+                            line = str(raw_line).rstrip()
+                        if line:
+                            print(f'ritobin: {line}')
+
+                return_code = process.wait()
+                if return_code != 0:
+                    print(f'ritobin: Error: converter exited with code {return_code}.')
+                    failures.append((command, return_code, None))
+
+        if failures:
+            raise RuntimeError(
+                f'Ritobin conversion failed for {len(failures)} file(s)/command(s). '
+                'See the ritobin messages above for details.'
+            )

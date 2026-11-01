@@ -255,8 +255,17 @@ class ExtractedHashes:
                 for StaticMaterialDef in StaticMaterialDefs:
                     names = StaticMaterialDef.get_items(lambda field: field.hash == Storage.bin_hashes['name'])
                     if len(names) > 0:
-                        hashtables['hashes.binentries.txt'][StaticMaterialDef.hash] = names[0].data
-                        print(f'hash_helper: Finish: Extract: {names[0].data}')
+                        material_name = names[0].data
+                        # A 64-bit Hash is one-way; do not store its hex value as if it
+                        # were a recovered material path in hashes.binentries.txt.
+                        is_wide_hash = (
+                            isinstance(material_name, str)
+                            and pyRitoFile.bin.BINHasher.is_hash(material_name)
+                            and len(material_name) == 16
+                        )
+                        if not is_wide_hash:
+                            hashtables['hashes.binentries.txt'][StaticMaterialDef.hash] = material_name
+                            print(f'hash_helper: Finish: Extract: {material_name}')
                 # extract file hashes
                 for entry in bin.entries:
                     for field in entry.data:

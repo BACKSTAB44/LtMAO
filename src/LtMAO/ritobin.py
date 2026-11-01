@@ -1,9 +1,64 @@
 from LtMAO import lepath, pyRitoFile
 
 
+class HashTypeSpec:
+    def __init__(self, width=4, algorithm='fnv1a'):
+        self.width = width
+        self.algorithm = algorithm
+
+
+def _split_type_arguments(text):
+    parts, depth, start = [], 0, 0
+    for index, char in enumerate(text):
+        if char == '[':
+            depth += 1
+        elif char == ']':
+            depth -= 1
+        elif char == ',' and depth == 0:
+            parts.append(text[start:index].strip())
+            start = index + 1
+    parts.append(text[start:].strip())
+    return parts
+
+
 
 def f32_str(num):
-    return f'{num:.4f}'.rstrip('0').rstrip('.')
+    """Return the shortest round-trip-safe f32 as ordinary decimal notation.
+
+    Find the shortest significant-digit representation that converts back to
+    the same IEEE-754 binary32 value. Then expand any exponent with Decimal so
+    the emitted Ritobin text uses ordinary decimal notation (for example,
+    1.2e+02 becomes 120). This keeps the original Writer's compact formatting
+    without rounding values to four decimal places or emitting scientific
+    notation that the older LtMAO parser may not accept consistently.
+    """
+    import math
+    import struct
+    from decimal import Decimal
+
+    value = float(num)
+    if math.isnan(value):
+        return 'nan'
+    if math.isinf(value):
+        return '-inf' if value < 0 else 'inf'
+
+    target = struct.pack('<f', value)
+    for precision in range(1, 10):
+        candidate = format(value, f'.{precision}g')
+        try:
+            if struct.pack('<f', float(candidate)) == target:
+                decimal_text = format(Decimal(candidate), 'f')
+                if '.' in decimal_text:
+                    decimal_text = decimal_text.rstrip('0').rstrip('.')
+                return decimal_text
+        except (OverflowError, ValueError):
+            continue
+
+    # Nine significant decimal digits are sufficient to round-trip any f32.
+    decimal_text = format(Decimal(format(value, '.9g')), 'f')
+    if '.' in decimal_text:
+        decimal_text = decimal_text.rstrip('0').rstrip('.')
+    return decimal_text
 
 def make_escapes(text):
     escape_chars = {
@@ -32,42 +87,68 @@ def clean_escapes(text):
 def add_indent(indent):
     return indent * 4 * ' '
 
-def clean_type(bin_type):
+def _hash_widths(value):
+    if isinstance(value, str) and pyRitoFile.bin.BINHasher.is_hash(value):
+        return {8 if len(value) == 16 else 4}
+    if isinstance(value, dict):
+        widths = set()
+        for key, item in value.items():
+            widths.update(_hash_widths(key))
+            widths.update(_hash_widths(item))
+        return widths
+    if isinstance(value, (list, tuple)):
+        widths = set()
+        for item in value:
+            widths.update(_hash_widths(item))
+        return widths
+    return set()
+
+
+def clean_type(bin_type, value=None):
+    if bin_type == pyRitoFile.bin.BINType.HASH:
+        widths = _hash_widths(value)
+        if len(widths) > 1:
+            raise ValueError('Ritobin cannot represent mixed Hash widths in one container/map side.')
+        if widths == {8}:
+            return 'hash[u64]'
     return bin_type.name.lower()
 
 def hash_or_raw(name, quote=True):
     if pyRitoFile.bin.BINHasher.is_hash(name):
-        return f'0x{name}'
-    else:
-        return f'"{name}"' if quote else name
-    
+        return f'0x{name.lower()}'
+    return f'"{name}"' if quote else name
+
 def make_types(str_type):
-    str_type = str_type.replace(' ', '')
-    start = -1
-    sep = -1
-    end = -1
-    for i in range(len(str_type)):
-        if str_type[i] == '[':
-            start = i
-        elif str_type[i] == ',':
-            sep = i
-        elif str_type[i] == ']':
-            end = i
-    if start == -1:
-        return [
-            pyRitoFile.bin.BINType[str_type.upper()]
-        ]
-    if sep == -1:
-        return [
-            pyRitoFile.bin.BINType[str_type[0:start].upper()], 
-            pyRitoFile.bin.BINType[str_type[start+1:end].upper()]
-        ]
-    else:
-        return [
-            pyRitoFile.bin.BINType[str_type[0:start].upper()], 
-            pyRitoFile.bin.BINType[str_type[start+1:sep].upper()], 
-            pyRitoFile.bin.BINType[str_type[sep+1:end].upper()]
-        ]
+    """Parse nested Ritobin types; hash width/algorithm are metadata, not BIN kinds."""
+    str_type = str_type.strip().replace(' ', '')
+    open_at = str_type.find('[')
+    if open_at < 0:
+        return [pyRitoFile.bin.BINType[str_type.upper()]]
+    if not str_type.endswith(']'):
+        raise ValueError(f'Invalid Ritobin type: {str_type}')
+    base = str_type[:open_at].lower()
+    args = _split_type_arguments(str_type[open_at + 1:-1])
+
+    if base == 'hash':
+        if len(args) == 0:
+            return [pyRitoFile.bin.BINType.HASH, HashTypeSpec(4, 'fnv1a')]
+        if len(args) not in (1, 2) or args[0] not in ('u32', 'u64'):
+            raise ValueError(f'Invalid hash type: {str_type}')
+        algorithm = args[1].lower() if len(args) == 2 else None
+        if algorithm not in (None, 'fnv1a', 'xxh64', 'xxh3'):
+            raise ValueError(f'Unsupported hash algorithm: {algorithm}')
+        return [pyRitoFile.bin.BINType.HASH, HashTypeSpec(4 if args[0] == 'u32' else 8, algorithm)]
+
+    kind = pyRitoFile.bin.BINType[base.upper()]
+    if kind in (pyRitoFile.bin.BINType.LIST, pyRitoFile.bin.BINType.LIST2, pyRitoFile.bin.BINType.OPTION):
+        if len(args) != 1:
+            raise ValueError(f'{base} expects one type argument')
+        return [kind, make_types(args[0])]
+    if kind == pyRitoFile.bin.BINType.MAP:
+        if len(args) != 2:
+            raise ValueError('map expects two type arguments')
+        return [kind, make_types(args[0]), make_types(args[1])]
+    raise ValueError(f'{base} does not accept type arguments')
 
 class Reader:
     def __init__(self, text):
@@ -134,6 +215,35 @@ class Reader:
     def read_hash(self):
         return self.read_quote() if self.text[self.cur] == '"' else self.read_non_quote().removeprefix('0x')
 
+    def read_hash_value(self, hash_spec):
+        quoted = self.text[self.cur] == '"'
+        raw = self.read_hash()
+        width = hash_spec.width if hash_spec is not None else 4
+        algorithm = hash_spec.algorithm if hash_spec is not None else 'fnv1a'
+        is_numeric_hex = (
+            not quoted
+            and len(raw) in (8, 16)
+            and all(c in '0123456789abcdefABCDEF' for c in raw)
+        )
+        if is_numeric_hex:
+            value = int(raw, 16)
+        else:
+            if algorithm is None:
+                raise ValueError('A quoted string cannot be converted by hash[u32/u64] without an algorithm.')
+            if algorithm == 'fnv1a':
+                value = int(pyRitoFile.bin.BINHasher.raw_to_hex(raw), 16)
+            else:
+                try:
+                    import xxhash
+                except ImportError as exc:
+                    raise ImportError('The xxhash package is required for hash[u64,xxh64/xxh3].') from exc
+                ascii_lower = raw.translate(str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))
+                encoded = ascii_lower.encode('utf-8')
+                value = xxhash.xxh64_intdigest(encoded) if algorithm == 'xxh64' else xxhash.xxh3_64_intdigest(encoded)
+        if width == 4:
+            value &= 0xffffffff
+        return f'{value:0{width * 2}x}'
+
     def read_num(self):
         text, cur, end = self.text, self.cur, self.end
         left = cur
@@ -177,7 +287,7 @@ class Reader:
                 self.cur += 1
                 break
             else:
-                res.append(self.read_value([value_type]))
+                res.append(self.read_value(value_type))
         return res
     
     def read_pointer_or_embed(self):
@@ -206,7 +316,7 @@ class Reader:
             return None
         else:
             self.read_space()
-            res = self.read_value([value_type])
+            res = self.read_value(value_type)
             self.read_space()
             self.read_exact('}')
         return res
@@ -220,11 +330,11 @@ class Reader:
                 self.cur += 1
                 break
             else:
-                key = self.read_value([key_type])
+                key = self.read_value(key_type)
                 self.read_space()
                 self.read_exact('=')
                 self.read_space()
-                value = self.read_value([value_type])
+                value = self.read_value(value_type)
                 res[key] = value
         return res
     
@@ -259,7 +369,19 @@ class Reader:
     }
 
     def read_value(self, value_types):
-        return self.read_value_dict[value_types[0]](self, value_types)
+        if isinstance(value_types, pyRitoFile.bin.BINType):
+            value_types = [value_types]
+        value_type = value_types[0]
+        if value_type == pyRitoFile.bin.BINType.HASH:
+            spec = value_types[1] if len(value_types) > 1 else HashTypeSpec()
+            return self.read_hash_value(spec)
+        if value_type in (pyRitoFile.bin.BINType.LIST, pyRitoFile.bin.BINType.LIST2):
+            return self.read_list_or_list2(value_types[1])
+        if value_type == pyRitoFile.bin.BINType.OPTION:
+            return self.read_option(value_types[1])
+        if value_type == pyRitoFile.bin.BINType.MAP:
+            return self.read_map(value_types[1], value_types[2])
+        return self.read_value_dict[value_type](self, value_types)
     
     def read_field(self):
         self.read_space()
@@ -278,8 +400,8 @@ class Reader:
         # update field
         field.type = field_types[0]
         if field.type in (pyRitoFile.bin.BINType.LIST, pyRitoFile.bin.BINType.LIST2, pyRitoFile.bin.BINType.OPTION):
-            # set value type for list & option
-            field.value_type = field_types[1]
+            # The type spec may include hash[u64]; BINField stores the primitive kind.
+            field.value_type = field_types[1][0]
         elif field.type in (pyRitoFile.bin.BINType.POINTER, pyRitoFile.bin.BINType.EMBED):
             # set hash type for embed & pointer
             # life hack: read value return a new field 
@@ -287,9 +409,9 @@ class Reader:
             field.hash_type = field.data.hash_type
             field.data = field.data.data
         elif field.type == pyRitoFile.bin.BINType.MAP:
-            # set key, value type for map
-            field.key_type = field_types[1]
-            field.value_type = field_types[2]
+            # set key, value kind for map; hash width is preserved in each hex value
+            field.key_type = field_types[1][0]
+            field.value_type = field_types[2][0]
         return field
         
     def read_entry(self):
@@ -374,10 +496,15 @@ class Reader:
         self.read_exact('=')
         self.read_space()
         # data
-        if field_types[0] in (pyRitoFile.bin.BINType.LIST, pyRitoFile.bin.BINType.LIST2):
+        if field_types[0] in (pyRitoFile.bin.BINType.LIST, pyRitoFile.bin.BINType.LIST2,
+                              pyRitoFile.bin.BINType.OPTION, pyRitoFile.bin.BINType.MAP):
             field = pyRitoFile.bin.BINField()
             field.type = field_types[0]
-            field.value_type = field_types[1]
+            if field.type == pyRitoFile.bin.BINType.MAP:
+                field.key_type = field_types[1][0]
+                field.value_type = field_types[2][0]
+            else:
+                field.value_type = field_types[1][0]
             field.data = self.read_value(field_types)
             patch.data = field
         else:
@@ -488,7 +615,7 @@ class Writer:
             print(value_type + ' is not sp yet')
     
     def write_list_or_list2(self, field, indent):
-        text = f'{add_indent(indent)}{hash_or_raw(field.hash, quote=False)}: {clean_type(field.type)}[{clean_type(field.value_type)}] = {{'
+        text = f'{add_indent(indent)}{hash_or_raw(field.hash, quote=False)}: {clean_type(field.type)}[{clean_type(field.value_type, field.data)}] = {{'
         if len(field.data) > 0:
             text += '\n'
             for value in field.data:
@@ -513,7 +640,7 @@ class Writer:
         return text
 
     def write_option(self, field, indent):
-        text = f'{add_indent(indent)}{hash_or_raw(field.hash, quote=False)}: {clean_type(field.type)}[{clean_type(field.value_type)}] = {{'
+        text = f'{add_indent(indent)}{hash_or_raw(field.hash, quote=False)}: {clean_type(field.type)}[{clean_type(field.value_type, field.data)}] = {{'
         if field.data != None:
             text += '\n'
             text += f'{self.write_value(field.data, field.value_type, indent+1, inline=False)}\n'
@@ -523,7 +650,7 @@ class Writer:
         return text
 
     def write_map(self, field, indent):
-        text = f'{add_indent(indent)}{hash_or_raw(field.hash, quote=False)}: {clean_type(field.type)}[{clean_type(field.key_type)},{clean_type(field.value_type)}] = {{'
+        text = f'{add_indent(indent)}{hash_or_raw(field.hash, quote=False)}: {clean_type(field.type)}[{clean_type(field.key_type, list(field.data.keys()))},{clean_type(field.value_type, list(field.data.values()))}] = {{'
         if len(field.data) > 0:
             text += '\n'
             for key, value in field.data.items():
@@ -555,7 +682,7 @@ class Writer:
         elif field.type == pyRitoFile.bin.BINType.MTX44:
             text = self.write_matrix(field, indent)
         else:
-            text = f'{add_indent(indent)}{hash_or_raw(field.hash, quote=False)}: {clean_type(field.type)} = {self.write_value(field.data, field.type, indent)}\n'
+            text = f'{add_indent(indent)}{hash_or_raw(field.hash, quote=False)}: {clean_type(field.type, field.data)} = {self.write_value(field.data, field.type, indent)}\n'
         return text
     
     def write_entry(self, entry, indent):
@@ -597,11 +724,32 @@ class Writer:
         text += f'{add_indent(indent+1)}value: '
         if patch.type in (pyRitoFile.bin.BINType.LIST, pyRitoFile.bin.BINType.LIST2):
             field = patch.data
-            text += f'{add_indent(0)}{clean_type(field.type)}[{clean_type(field.value_type)}] = {{'
+            text += f'{add_indent(0)}{clean_type(field.type)}[{clean_type(field.value_type, field.data)}] = {{'
             if len(field.data) > 0:
                 text += '\n'
                 for value in field.data:
                     text += f'{self.write_value(value, field.value_type, indent+2, inline=False)}\n'
+                text += f'{add_indent(indent+1)}}}\n'
+            else:
+                text += '}\n'
+        elif patch.type == pyRitoFile.bin.BINType.OPTION:
+            field = patch.data
+            text += f'{add_indent(0)}option[{clean_type(field.value_type, field.data)}] = {{'
+            if field.data is not None:
+                text += '\n'
+                text += f'{self.write_value(field.data, field.value_type, indent+2, inline=False)}\n'
+                text += f'{add_indent(indent+1)}}}\n'
+            else:
+                text += '}\n'
+        elif patch.type == pyRitoFile.bin.BINType.MAP:
+            field = patch.data
+            key_type = clean_type(field.key_type, list(field.data.keys()))
+            value_type = clean_type(field.value_type, list(field.data.values()))
+            text += f'{add_indent(0)}map[{key_type},{value_type}] = {{'
+            if field.data:
+                text += '\n'
+                for key, value in field.data.items():
+                    text += f'{self.write_value(key, field.key_type, indent+2, inline=False)} = {self.write_value(value, field.value_type, indent+2, inline=True)}\n'
                 text += f'{add_indent(indent+1)}}}\n'
             else:
                 text += '}\n'
@@ -627,7 +775,7 @@ class Writer:
             text += f'{add_indent(indent+2)}{f32_str(matrix.m)}, {f32_str(matrix.n)}, {f32_str(matrix.o)}, {f32_str(matrix.p)}\n'
             text += f'{add_indent(indent+1)}}}\n'
         else:
-            text += f'{clean_type(patch.type)} = {self.write_value(patch.data, patch.type, indent)}\n'
+            text += f'{clean_type(patch.type, patch.data)} = {self.write_value(patch.data, patch.type, indent)}\n'
         text += f'{add_indent(indent)}}}\n'
         return text
 

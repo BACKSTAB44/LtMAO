@@ -2,6 +2,10 @@ from .stream import BytesStream
 from .helper import FNV1a
 from .wad import WADHasher
 from enum import Enum
+from .hash_width import (
+    resolve_object_hash_widths, resolve_value_hash_widths,
+    HashWidthResolutionError, AmbiguousHashWidthError,
+)
 
 class BINType(Enum):
     # basic
@@ -56,10 +60,16 @@ class BINHasher:
     )
 
     @staticmethod
-    def hex_to_raw(hashtables, hex):
-        for table_name in reversed(BINHasher.HASHTABLE_NAMES):
-            if table_name in hashtables and hex in hashtables[table_name]:
-                return hashtables[table_name][hex]
+    def hex_to_raw(hashtables, hex, allow_wide=False):
+        # Ordinary BIN identifiers and HASH property values remain restricted
+        # to 32-bit name lookup. FILE values are 64-bit WAD hashes and may be
+        # resolved against the 16-digit hashes.game/hash.lcu tables.
+        if isinstance(hex, str) and (
+            len(hex) == 8 or (allow_wide and len(hex) == 16)
+        ):
+            for table_name in reversed(BINHasher.HASHTABLE_NAMES):
+                if table_name in hashtables and hex in hashtables[table_name]:
+                    return hashtables[table_name][hex]
         return hex
     
     @staticmethod
@@ -67,29 +77,43 @@ class BINHasher:
         return f'{FNV1a(raw):08x}'
 
     @staticmethod
-    def hash_to_hex(hash):
-        return f'{hash:08x}'
+    def hash_to_hex(hash, width=4):
+        return f'{hash:0{width * 2}x}'
     
     @staticmethod
     def is_hash(raw):
-        if len(raw) != 8: return False
-        try: 
+        if not isinstance(raw, str) or len(raw) not in (8, 16):
+            return False
+        try:
             int(raw, 16)
             return True
-        except:
+        except (TypeError, ValueError):
             return False
 
     @staticmethod
+    def hash_width(raw_or_hex):
+        return 8 if BINHasher.is_hash(raw_or_hex) and len(raw_or_hex) == 16 else 4
+
+    @staticmethod
     def raw_or_hex_to_hash(raw_or_hex):
-        if len(raw_or_hex) != 8: return FNV1a(raw_or_hex)
-        try:
-            return int(raw_or_hex, 16)
-        except:
-            return FNV1a(raw_or_hex)
+        # This converter is for fixed-width 32-bit BIN identifiers only.
+        # A 64-bit property Hash is handled separately by BINWriter.write_hash_value.
+        if isinstance(raw_or_hex, str) and len(raw_or_hex) == 8:
+            try:
+                return int(raw_or_hex, 16)
+            except ValueError:
+                pass
+        return FNV1a(raw_or_hex)
         
     @staticmethod
     def un_hash_value(hashtables, value, value_type):
-        if value_type in (BINType.HASH, BINType.FILE, BINType.LINK):
+        if value_type == BINType.HASH:
+            # A 64-bit Hash is a value hash, not a file-path lookup key.
+            return BINHasher.hex_to_raw(hashtables, value)
+        elif value_type == BINType.FILE:
+            # FILE stores a 64-bit WAD hash and remains resolvable in game tables.
+            return BINHasher.hex_to_raw(hashtables, value, allow_wide=True)
+        elif value_type == BINType.LINK:
             return BINHasher.hex_to_raw(hashtables, value)
         elif value_type in (BINType.LIST, BINType.LIST2):
             value.data = [BINHasher.un_hash_value(hashtables, v, value_type) for v in value.data]
@@ -116,16 +140,16 @@ class BINHasher:
             field.data = {
                 BINHasher.un_hash_value(hashtables, key, field.key_type): BINHasher.un_hash_value(hashtables, value, field.value_type) for key, value in field.data.items()
             }
+        elif field.type == BINType.OPTION and field.data is not None:
+            field.data = BINHasher.un_hash_value(hashtables, field.data, field.value_type)
         else:
             field.data = BINHasher.un_hash_value(hashtables, field.data, field.type)
 
     @staticmethod
     def un_hash_patch(hashtables, patch):
         patch.hash = BINHasher.hex_to_raw(hashtables, patch.hash)
-        if patch.type in (BINType.LIST, BINType.LIST2):
-            field = patch.data
-            field.data = [BINHasher.un_hash_value(hashtables, v, field.value_type)
-                            for v in field.data]
+        if patch.type in (BINType.LIST, BINType.LIST2, BINType.OPTION, BINType.MAP):
+            BINHasher.un_hash_field(hashtables, patch.data)
         elif patch.type in (BINType.EMBED, BINType.POINTER):
             field = patch.data
             if field.hash_type != '00000000':
@@ -137,6 +161,15 @@ class BINHasher:
 
 
 class BINReader:
+    @staticmethod
+    def read_hash_value(bs):
+        # The resolver records absolute stream offsets for 8-byte Hash payloads.
+        # Class hashes, property hashes and LINK values remain 32-bit.
+        offset = bs.tell()
+        if offset in getattr(bs, 'wide_hash_offsets', set()):
+            return BINHasher.hash_to_hex(bs.read_u64()[0], width=8)
+        return BINHasher.hash_to_hex(bs.read_u32()[0])
+
     read_value_dict = {
         BINType.NONE:       lambda: None,
         BINType.BOOL:       lambda bs: bs.read_b()[0],
@@ -155,12 +188,14 @@ class BINReader:
         BINType.MTX44:      lambda bs: bs.read_mtx4()[0],
         BINType.RGBA:       lambda bs: bs.read_u8(4),
         BINType.STRING:     lambda bs: bs.read_s_sized16(encoding='utf-8')[0],
-        BINType.HASH:       lambda bs: BINHasher.hash_to_hex(bs.read_u32()[0]),
+        BINType.HASH:       lambda bs: BINReader.read_hash_value(bs),
         BINType.FILE:       lambda bs: WADHasher.hash_to_hex(bs.read_u64()[0]),
         BINType.LIST:       lambda bs: BINReader.read_list_or_list2(bs, BINField(type=BINType.LIST)),
         BINType.LIST2:      lambda bs: BINReader.read_list_or_list2(bs, BINField(type=BINType.LIST2)),
         BINType.POINTER:    lambda bs: BINReader.read_pointer_or_embed(bs, BINField(type=BINType.POINTER)),
         BINType.EMBED:      lambda bs: BINReader.read_pointer_or_embed(bs, BINField(type=BINType.EMBED)),
+        BINType.OPTION:     lambda bs: BINReader.read_option(bs, BINField(type=BINType.OPTION)),
+        BINType.MAP:        lambda bs: BINReader.read_map(bs, BINField(type=BINType.MAP)),
         BINType.LINK:       lambda bs: BINHasher.hash_to_hex(bs.read_u32()[0]),
         BINType.FLAG:       lambda bs: bs.read_u8()[0],
     }
@@ -241,6 +276,23 @@ class BINReader:
 
 
 class BINWriter:
+    @staticmethod
+    def validate_hash_widths(values, label):
+        widths = {
+            8 if BINHasher.is_hash(value) and len(value) == 16 else 4
+            for value in values
+        }
+        if len(widths) > 1:
+            raise ValueError(f'{label} cannot mix 4-byte and 8-byte Hash values.')
+
+    @staticmethod
+    def write_hash_value(bs, value):
+        if BINHasher.is_hash(value) and len(value) == 16:
+            bs.write_u64(int(value, 16))
+            return None, 8
+        bs.write_u32(BINHasher.raw_or_hex_to_hash(value))
+        return None, 4
+
     write_value_dict = {
         BINType.NONE:           lambda: (None, 0),
         BINType.BOOL:           lambda bs, value: (bs.write_b(value), 1),
@@ -259,12 +311,14 @@ class BINWriter:
         BINType.MTX44:          lambda bs, value: (bs.write_mtx4(value), 64),
         BINType.RGBA:           lambda bs, value: (bs.write_u8(*value), 4),
         BINType.STRING:         lambda bs, value: (bs.write_s_sized16(value, encoding='utf-8'), len(value.encode('utf-8'))+2),
-        BINType.HASH:           lambda bs, value: (bs.write_u32(BINHasher.raw_or_hex_to_hash(value)), 4),
+        BINType.HASH:           lambda bs, value: BINWriter.write_hash_value(bs, value),
         BINType.FILE:           lambda bs, value: (bs.write_u64(WADHasher.raw_or_hex_to_hash(value)), 8),
         BINType.LIST:           lambda bs, value: BINWriter.write_list_or_list2(bs, value),
         BINType.LIST2:          lambda bs, value: BINWriter.write_list_or_list2(bs, value),
         BINType.POINTER:        lambda bs, value: BINWriter.write_pointer_or_embed(bs, value),
         BINType.EMBED:          lambda bs, value: BINWriter.write_pointer_or_embed(bs, value),
+        BINType.OPTION:         lambda bs, value: BINWriter.write_option(bs, value),
+        BINType.MAP:            lambda bs, value: BINWriter.write_map(bs, value),
         BINType.LINK:           lambda bs, value: (bs.write_u32(BINHasher.raw_or_hex_to_hash(value)), 4),
         BINType.FLAG:           lambda bs, value: (bs.write_u8(value), 1),
     }
@@ -280,6 +334,8 @@ class BINWriter:
 
     @staticmethod
     def write_list_or_list2(bs, field):
+        if field.value_type == BINType.HASH:
+            BINWriter.validate_hash_widths(field.data, 'A BIN hash container')
         size = 0
         bs.write_u8(field.value_type.value)
 
@@ -334,6 +390,10 @@ class BINWriter:
     
     @staticmethod
     def write_map(bs, field):
+        if field.key_type == BINType.HASH:
+            BINWriter.validate_hash_widths(field.data.keys(), 'BIN map keys')
+        if field.value_type == BINType.HASH:
+            BINWriter.validate_hash_widths(field.data.values(), 'BIN map values')
         size = 0
         bs.write_u8(
             field.key_type.value,
@@ -486,42 +546,69 @@ class BIN:
             entry_count, = bs.read_u32()
             entry_types = bs.read_u32(entry_count)
             entry_offset = bs.tell()
-            try:
-                bs.legacy_read = False
-                # read as new bin
-                self.entries = [BINEntry() for i in range(entry_count)]
-                for entry_id, entry in enumerate(self.entries):
-                    entry.type = BINHasher.hash_to_hex(entry_types[entry_id])
-                    bs.pad(4)  # size
-                    entry.hash = BINHasher.hash_to_hex(bs.read_u32()[0])
-                    field_count, = bs.read_u16()
-                    entry.data = [BINReader.read_field(
-                        bs) for i in range(field_count)]
-            except ValueError:
-                # legacy bin, fall back
+
+            def read_entries(legacy):
                 bs.seek(entry_offset)
-                bs.legacy_read = True
-                self.entries = [BINEntry() for i in range(entry_count)]
+                bs.legacy_read = legacy
+                self.entries = [BINEntry() for _ in range(entry_count)]
                 for entry_id, entry in enumerate(self.entries):
                     entry.type = BINHasher.hash_to_hex(entry_types[entry_id])
-                    bs.pad(4)  # size
+                    object_size, = bs.read_u32()
+                    record_start = bs.tell() - 4
+                    object_body = bs.read(object_size)
+                    if len(object_body) != object_size:
+                        raise ValueError('Truncated BIN object record.')
+                    record = object_size.to_bytes(4, 'little') + object_body
+
+                    if legacy:
+                        wide_offsets = set()
+                    else:
+                        wide_offsets = resolve_object_hash_widths(record)
+                    bs.wide_hash_offsets = {record_start + offset for offset in wide_offsets}
+
+                    bs.seek(record_start + 4)
                     entry.hash = BINHasher.hash_to_hex(bs.read_u32()[0])
                     field_count, = bs.read_u16()
-                    entry.data = [BINReader.read_field(
-                        bs) for i in range(field_count)]
-            except Exception as e:
-                # raise any other errors
-                raise e
+                    entry.data = [BINReader.read_field(bs) for _ in range(field_count)]
+                    if bs.tell() != record_start + 4 + object_size:
+                        raise ValueError('BIN object parser did not consume its declared size.')
+
+            try:
+                read_entries(False)
+            except AmbiguousHashWidthError:
+                # Do not reinterpret a genuinely ambiguous current-format BIN as legacy.
+                raise
+            except ValueError:
+                # The legacy property-kind numbering predates WadChunkLink and cannot
+                # contain 8-byte Hash values. Retry it with all Hash values kept narrow.
+                read_entries(True)
             # patches
             if self.is_patch and self.version >= 3:
                 patch_count, = bs.read_u32()
                 self.patches = [BINPatch() for i in range(patch_count)]
                 for patch in self.patches:
                     patch.hash = BINHasher.hash_to_hex(bs.read_u32()[0])
-                    bs.pad(4)  # size
+                    patch_size, = bs.read_u32()
+                    payload_start = bs.tell()
+                    payload_end = payload_start + patch_size
+                    if payload_end > bs.end():
+                        raise ValueError('Truncated PTCH record.')
                     patch.type = BINType.fix(bs, bs.read_u8()[0])
                     patch.path, = bs.read_s_sized16(encoding='utf-8')
+                    value_start = bs.tell()
+                    value_size = payload_end - value_start
+                    if value_size < 0:
+                        raise ValueError('Invalid PTCH record size.')
+                    value_bytes = bs.read(value_size)
+                    if bs.legacy_read:
+                        wide_offsets = set()
+                    else:
+                        wide_offsets = resolve_value_hash_widths(value_bytes, patch.type.value)
+                    bs.wide_hash_offsets = {value_start + offset for offset in wide_offsets}
+                    bs.seek(value_start)
                     patch.data = BINReader.read_value(bs, patch.type)
+                    if bs.tell() != payload_end:
+                        raise ValueError('PTCH value parser did not consume its declared size.')
 
             return self
         
@@ -562,7 +649,7 @@ class BIN:
 
                     return_offset = bs.tell()
                     bs.write_u32(0)  # size
-                    patch_size = 1 + 2 + len(patch.path)
+                    patch_size = 1 + 2 + len(patch.path.encode('utf-8'))
 
                     bs.write_u8(patch.type.value)
                     bs.write_s_sized16(patch.path, encoding='utf-8')

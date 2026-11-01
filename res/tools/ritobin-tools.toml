@@ -1,0 +1,7 @@
+[print_config]
+indent_size = 4
+
+[print_config.wrap]
+line_width = 120
+inline_structs = false
+inline_lists = true

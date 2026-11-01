@@ -218,8 +218,6 @@ class RITOBIN:
         Conventional pairs are batched into one CLI call. Pairs with custom
         output names use an explicit --output argument and their own process.
         """
-        import os
-
         if len(file_pairs) % 2:
             raise ValueError('RITOBIN.run expects input/output file pairs.')
 
@@ -290,7 +288,7 @@ class RITOBIN:
         """Return True only for errors that plausibly need fresh property-hasher metadata."""
         import re
 
-        message = "\n".join(output_lines).lower()
+        message = (output_lines if isinstance(output_lines, str) else "\n".join(output_lines)).lower()
         patterns = (
             r"type mismatch.{0,160}hash\s*\[\s*u(?:32|64)\s*\].{0,100}(?:string|text)",
             r"(?:expected|expecting)\s+hash\s*\[\s*u(?:32|64)\s*\].{0,100}(?:string|text)",
@@ -301,7 +299,16 @@ class RITOBIN:
 
     @staticmethod
     def _run_captured_command(command):
-        """Run one command and hold its output until we know whether retry is needed."""
+        """Run one command, spooling output to disk after a small memory limit.
+
+        Output is held until the exit code is known because a successful
+        metadata retry must suppress the first attempt's parser diagnostics.
+        SpooledTemporaryFile keeps normal logs in memory but spills large logs
+        to the system temporary directory instead of growing RAM without bound.
+        The caller must close the returned output stream.
+        """
+        import tempfile
+
         try:
             process = subprocess.Popen(
                 command,
@@ -310,23 +317,38 @@ class RITOBIN:
                 stderr=subprocess.STDOUT,
             )
         except OSError as exc:
-            return None, [], exc
+            return None, None, exc, ''
 
-        output_lines = []
-        if process.stdout is not None:
-            for raw_line in process.stdout:
-                if isinstance(raw_line, bytes):
-                    line = raw_line.decode('utf-8', errors='replace').rstrip()
-                else:
-                    line = str(raw_line).rstrip()
-                if line:
-                    output_lines.append(line)
-        return process.wait(), output_lines, None
+        output_stream = tempfile.SpooledTemporaryFile(
+            max_size=1024 * 1024,
+            mode='w+t',
+            encoding='utf-8',
+            newline='',
+        )
+        error_tail = ''
+        try:
+            if process.stdout is not None:
+                for raw_line in process.stdout:
+                    if isinstance(raw_line, bytes):
+                        line = raw_line.decode('utf-8', errors='replace').rstrip()
+                    else:
+                        line = str(raw_line).rstrip()
+                    if line:
+                        output_stream.write(line + '\n')
+                        error_tail = (error_tail + line + '\n')[-65536:]
+            return process.wait(), output_stream, None, error_tail
+        except Exception:
+            output_stream.close()
+            raise
+
+
 
     @staticmethod
-    def _print_captured_output(output_lines):
-        for line in output_lines:
-            print(f'ritobin: {line}')
+    def _discard_captured_output(output):
+        """Close captured converter output without displaying its contents."""
+        close = getattr(output, 'close', None)
+        if callable(close):
+            close()
 
     @staticmethod
     def run(file_pairs, dir_hashes=None):
@@ -339,6 +361,8 @@ class RITOBIN:
             return
         if len(file_pairs) % 2:
             raise ValueError('RITOBIN.run expects input/output file pairs.')
+
+        print(f'ritobin: Start: Process {len(file_pairs) // 2} files.')
 
         bin_to_text_pairs = []
         text_to_bin_pairs = []
@@ -370,15 +394,12 @@ class RITOBIN:
             for index in range(0, len(bin_to_text_pairs), 2):
                 input_file = bin_to_text_pairs[index]
                 output_file = bin_to_text_pairs[index + 1]
-                print(f'ritobin: Start: {input_file} -> {output_file}')
                 try:
                     output_dir = os.path.dirname(os.path.abspath(output_file))
                     if output_dir:
                         os.makedirs(output_dir, exist_ok=True)
                     ritobin.bin_to_text(input_file, output_file, hash_tables)
-                    print(f'ritobin: Finish: {input_file} -> {output_file}')
                 except Exception as exc:
-                    print(f'ritobin: Error: {input_file}: {exc}')
                     failures.append((input_file, output_file, exc))
 
         # Prepare temporary text copies for metadata-defined scalar Hash strings.
@@ -388,7 +409,7 @@ class RITOBIN:
         if text_to_bin_pairs:
             prepared_pairs = []
             temporary_inputs = []
-            prepared_to_original = {}
+            prepared_to_original = []
             metadata_retry_attempted = False
             try:
                 for index in range(0, len(text_to_bin_pairs), 2):
@@ -400,105 +421,110 @@ class RITOBIN:
                         )
                         if temporary_path:
                             temporary_inputs.append(temporary_path)
-                            print(
-                                'ritobin: Info: Applied metadata-defined hash annotation to '
-                                f'{replacements} property-specific '
-                                f'string field(s) in temporary input: {input_file}'
-                            )
                         prepared_pairs.extend((prepared_input, output_file))
-                        prepared_to_original[prepared_input] = (input_file, output_file)
+                        prepared_to_original.append((prepared_input, (input_file, output_file)))
                     except Exception as exc:
-                        print(f'ritobin: Error: Could not prepare {input_file}: {exc}')
                         failures.append((input_file, output_file, exc))
 
                 commands = RITOBIN.build_commands(prepared_pairs, dir_hashes)
-                for command in commands:
-                    print(f'ritobin: Start: {command[-1] if command else "conversion"}')
-                    return_code, output_lines, launch_error = RITOBIN._run_captured_command(command)
+                for command_index, command in enumerate(commands):
+                    return_code, output_stream, launch_error, error_tail = RITOBIN._run_captured_command(command)
 
                     if launch_error is not None:
-                        print(f'ritobin: Error: Could not start converter: {launch_error}')
                         failures.append((command, None, launch_error))
                         continue
 
                     if return_code == 0:
-                        RITOBIN._print_captured_output(output_lines)
+                        RITOBIN._discard_captured_output(output_stream)
                         continue
 
                     # Only hash/string parser errors can invalidate a metadata
-                    # assumption. Syntax errors and unrelated failures keep the
-                    # normal, immediate error path without a metadata request.
+                    # assumption. Syntax errors and unrelated failures do not
+                    # trigger a metadata request.
                     if (not metadata_retry_attempted
-                            and RITOBIN._is_hash_metadata_error(output_lines)):
+                            and RITOBIN._is_hash_metadata_error(error_tail)):
                         metadata_retry_attempted = True
                         refreshed, _refresh_source = ritobin_text.refresh_metadata_for_retry()
                         if refreshed:
-                            affected_pairs = []
-                            for prepared_input, original_pair in prepared_to_original.items():
-                                if prepared_input in command:
-                                    affected_pairs.extend(original_pair)
+                            # Re-prepare the current failed command AND every
+                            # command not yet executed. Their original temporary
+                            # inputs may contain annotations from stale metadata.
+                            pending_original_pairs = []
+                            for pending_command in commands[command_index:]:
+                                for prepared_input, original_pair in prepared_to_original:
+                                    if prepared_input not in pending_command:
+                                        continue
+                                    # Multiple custom-output conversions may use
+                                    # the same source path. Match their --output
+                                    # target too, so no pair is duplicated/lost.
+                                    if ('--output' in pending_command
+                                            and original_pair[1] not in pending_command):
+                                        continue
+                                    pending_original_pairs.extend(original_pair)
 
                             retry_pairs = []
-                            try:
-                                for retry_index in range(0, len(affected_pairs), 2):
-                                    original_input = affected_pairs[retry_index]
-                                    original_output = affected_pairs[retry_index + 1]
+                            for retry_index in range(0, len(pending_original_pairs), 2):
+                                original_input = pending_original_pairs[retry_index]
+                                original_output = pending_original_pairs[retry_index + 1]
+                                try:
                                     retry_input, retry_temporary, _ = (
                                         ritobin_text.make_temporary_conversion_input(original_input)
                                     )
                                     if retry_temporary:
                                         temporary_inputs.append(retry_temporary)
                                     retry_pairs.extend((retry_input, original_output))
+                                except Exception as exc:
+                                    failures.append((original_input, original_output, exc))
+
+                            try:
                                 retry_commands = RITOBIN.build_commands(retry_pairs, dir_hashes)
                             except Exception as exc:
-                                # The first diagnostic is more useful than a
-                                # hidden retry-preparation failure; preserve it.
-                                RITOBIN._print_captured_output(output_lines)
-                                print(f'ritobin: Error: Could not prepare metadata-refresh retry: {exc}')
+                                RITOBIN._discard_captured_output(output_stream)
                                 failures.append((command, return_code, exc))
-                                continue
+                                break
 
-                            if retry_commands:
-                                retry_succeeded = True
-                                for retry_command in retry_commands:
-                                    print(f'ritobin: Start: {retry_command[-1] if retry_command else "conversion"}')
-                                    retry_code, retry_output, retry_launch_error = (
-                                        RITOBIN._run_captured_command(retry_command)
-                                    )
-                                    if retry_launch_error is not None:
-                                        print(f'ritobin: Error: Could not start converter: {retry_launch_error}')
-                                        failures.append((retry_command, None, retry_launch_error))
-                                        retry_succeeded = False
-                                    elif retry_code != 0:
-                                        RITOBIN._print_captured_output(retry_output)
-                                        print(f'ritobin: Error: converter exited with code {retry_code}.')
-                                        failures.append((retry_command, retry_code, None))
-                                        retry_succeeded = False
-                                    else:
-                                        RITOBIN._print_captured_output(retry_output)
-                                if retry_succeeded:
-                                    # The original hash-related failure was
-                                    # intentionally suppressed; the retry worked.
-                                    continue
-                                continue
+                            if not retry_commands:
+                                RITOBIN._discard_captured_output(output_stream)
+                                failures.append((command, return_code, error_tail))
+                                break
+
+                            # The remaining work has now been rebuilt from fresh
+                            # metadata. Suppress the first error and do not resume
+                            # the stale original command list.
+                            RITOBIN._discard_captured_output(output_stream)
+                            for retry_command in retry_commands:
+                                retry_code, retry_output, retry_launch_error, _retry_tail = (
+                                    RITOBIN._run_captured_command(retry_command)
+                                )
+                                if retry_launch_error is not None:
+                                    failures.append((retry_command, None, retry_launch_error))
+                                elif retry_code != 0:
+                                    RITOBIN._discard_captured_output(retry_output)
+                                    failures.append((retry_command, retry_code, _retry_tail))
+                                else:
+                                    RITOBIN._discard_captured_output(retry_output)
+                            break
 
                     # Refresh was unavailable, the error was unrelated, or this
-                    # run already used its one retry. Show normal diagnostics.
-                    RITOBIN._print_captured_output(output_lines)
-                    print(f'ritobin: Error: converter exited with code {return_code}.')
-                    failures.append((command, return_code, None))
+                    # run already used its one retry. Show the original diagnostics.
+                    RITOBIN._discard_captured_output(output_stream)
+                    failures.append((command, return_code, error_tail))
             finally:
                 for temporary_path in temporary_inputs:
                     try:
                         os.remove(temporary_path)
-                    except OSError as exc:
-                        print(
-                            'ritobin: Warning: Could not remove temporary input '
-                            f'{temporary_path}: {exc}'
-                        )
+                    except OSError:
+                        pass
 
         if failures:
+            first_failure = failures[0]
+            detail = first_failure[2] if len(first_failure) > 2 else None
+            if detail is None and len(first_failure) > 1 and isinstance(first_failure[1], int):
+                detail = f'converter exited with code {first_failure[1]}'
+            if detail is not None:
+                detail_text = str(detail).strip()
+                detail = detail_text.splitlines()[-1][:240] if detail_text else None
+            suffix = f': {detail}' if detail else ''
             raise RuntimeError(
-                f'Ritobin conversion failed for {len(failures)} file(s)/command(s). '
-                'See the ritobin messages above for details.'
+                f'Ritobin conversion failed for {len(failures)} file(s)/command(s){suffix}.'
             )

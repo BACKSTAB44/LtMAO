@@ -44,7 +44,6 @@ TARGET_BUILD_FILE = os.path.join(META_CACHE_DIR, "target-build.txt")
 # Between refreshes, a compact local index is used instead of parsing the
 # much larger upstream database on every fresh LtMAO process.
 META_REFRESH_COOLDOWN_SECONDS = 12 * 60 * 60
-META_CACHE_TTL_SECONDS = META_REFRESH_COOLDOWN_SECONDS  # Backwards-compatible alias
 META_INDEX_FILE = os.path.join(META_CACHE_DIR, "meta.hash-index.json")
 META_CHECK_FILE = os.path.join(META_CACHE_DIR, "meta.last-check")
 MAX_META_DB_BYTES = 50 * 1024 * 1024
@@ -95,7 +94,9 @@ _METADATA_LOADED = False
 
 
 def _log(message: str) -> None:
-    print(f"ritobin: {message}")
+    # Metadata/cache status is intentionally quiet during Ritobin conversions.
+    # Conversion errors still propagate through MetadataError.
+    return
 
 
 def _valid_meta_db(data: Any) -> bool:
@@ -209,7 +210,7 @@ def _compact_metadata_database(database: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(property_record.get("name"), str):
                     compact_property["name"] = property_record["name"]
                 compact_property["revisions"] = [
-                    {key: revision[key] for key in ("from", "to", "type", "hasher", "default") if key in revision}
+                    {key: revision[key] for key in ("from", "to", "type", "hasher") if key in revision}
                     for revision in revisions
                     if isinstance(revision, dict) and isinstance(revision.get("from"), int)
                 ]
@@ -367,13 +368,7 @@ def refresh_metadata_for_retry() -> tuple[bool, str]:
     may continue using its stale cache, but callers should not retry a failed
     conversion against that unchanged metadata.
     """
-    # Suppress routine cache/download messages here: the retry path is meant
-    # to be transparent unless the converter still fails on its second attempt.
-    import contextlib
-    import io
-
-    with contextlib.redirect_stdout(io.StringIO()):
-        database, source = load_metadata_database(force_refresh=True)
+    database, source = load_metadata_database(force_refresh=True)
     refreshed = database is not None and source.startswith("downloaded ")
     return refreshed, source
 

@@ -5,7 +5,7 @@
 # Installation
 1. Download: [LtMAO-ritobin-update.zip](https://github.com/BACKSTAB44/LtMAO/archive/refs/heads/ritobin-update.zip)
 2. Extract: `LtMAO-ritobin-update.zip`
-3. Run `LtMAO-hai/start.bat`
+3. Run `start.bat`
 
 # Updates
 1. LtMAO-hai always check for latest version when you open the app. If there is a newer version, the app will display update message in title bar.

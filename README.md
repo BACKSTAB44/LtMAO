@@ -1,6 +1,4 @@
-# LtMAO-hai
-`LtMAO-hai` is my toolpack to help League modding.
-![](https://i.postimg.cc/W4HnKJXs/screenshot-14.png)
+# LtMAO-ritobin-update
 
 # Installation
 1. Download: [LtMAO-ritobin-update.zip](https://github.com/BACKSTAB44/LtMAO/archive/refs/heads/ritobin-update.zip)

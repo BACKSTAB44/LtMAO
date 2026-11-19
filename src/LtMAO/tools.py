@@ -353,7 +353,7 @@ class RITOBIN:
 
     @staticmethod
     def run(file_pairs, dir_hashes=None):
-        """Use LtMAO's original typed Writer for BIN-to-text; use v0.2.3 for text-to-BIN.
+        """Use LtMAO's original typed Writer for BIN-to-text; use ritobin-tools for text-to-BIN.
 
         The original Writer formats each BIN value type separately. In particular,
         LIST values are vertical while VEC2/VEC3/VEC4/RGBA values remain inline.

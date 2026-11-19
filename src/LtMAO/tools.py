@@ -523,7 +523,15 @@ class RITOBIN:
                 detail = f'converter exited with code {first_failure[1]}'
             if detail is not None:
                 detail_text = str(detail).strip()
-                detail = detail_text.splitlines()[-1][:240] if detail_text else None
+                if detail_text:
+                    # Keep the useful part of miette/rust diagnostics instead of
+                    # reducing the error to its final box-drawing border.
+                    detail_lines = detail_text.splitlines()
+                    detail = '\\n'.join(detail_lines[-12:])
+                    if len(detail) > 2400:
+                        detail = detail[-2400:]
+                else:
+                    detail = None
             suffix = f': {detail}' if detail else ''
             raise RuntimeError(
                 f'Ritobin conversion failed for {len(failures)} file(s)/command(s){suffix}.'

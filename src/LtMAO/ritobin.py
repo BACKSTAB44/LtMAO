@@ -61,28 +61,73 @@ def f32_str(num):
     return decimal_text
 
 def make_escapes(text):
+    """Escape a BIN string for Ritobin text, matching Moonshadow's writer."""
     escape_chars = {
+        '\\': '\\\\',
         '\n': '\\n',
         '\t': '\\t',
         '\r': '\\r',
+        '\a': '\\a',
+        '\b': '\\b',
+        '\f': '\\f',
         "'": "\\'",
         '"': '\\"',
     }
-    for escape_char, made_escape_char in escape_chars.items():
-        text = text.replace(escape_char, made_escape_char)
-    return text
+    escaped = []
+    for char in text:
+        if char in escape_chars:
+            escaped.append(escape_chars[char])
+        elif ord(char) < 0x20:
+            escaped.append(f'\\x{ord(char):02x}')
+        else:
+            escaped.append(char)
+    return ''.join(escaped)
+
 
 def clean_escapes(text):
+    """Decode Ritobin string escapes without confusing literal backslashes."""
     escape_chars = {
-        '\n': '\\n',
-        '\t': '\\t',
-        '\r': '\\r',
-        "'": "\\'",
-        '"': '\\"',
+        '\\': '\\',
+        'n': '\n',
+        't': '\t',
+        'r': '\r',
+        'a': '\a',
+        'b': '\b',
+        'f': '\f',
+        "'": "'",
+        '"': '"',
     }
-    for escape_char, made_escape_char in escape_chars.items():
-        text = text.replace(made_escape_char, escape_char)
-    return text
+    decoded = []
+    index = 0
+
+    while index < len(text):
+        char = text[index]
+        if char != '\\':
+            decoded.append(char)
+            index += 1
+            continue
+
+        if index + 1 >= len(text):
+            decoded.append('\\')
+            index += 1
+            continue
+
+        escaped_char = text[index + 1]
+        if escaped_char in escape_chars:
+            decoded.append(escape_chars[escaped_char])
+            index += 2
+        elif (
+            escaped_char == 'x'
+            and index + 3 < len(text)
+            and all(c in '0123456789abcdefABCDEF' for c in text[index + 2:index + 4])
+        ):
+            decoded.append(chr(int(text[index + 2:index + 4], 16)))
+            index += 4
+        else:
+            # Preserve unknown escapes instead of silently dropping the slash.
+            decoded.extend(('\\', escaped_char))
+            index += 2
+    return ''.join(decoded)
 
 def add_indent(indent):
     return indent * 4 * ' '
@@ -213,11 +258,24 @@ class Reader:
         self.read_exact(quote)
         text, cur, end = self.text, self.cur, self.end
         left = cur
-        while cur < end and text[cur] != quote or (text[cur] == quote and text[cur-1] == '\\'):
+        escaped = False
+
+        while cur < end:
+            char = text[cur]
+            if char == quote and not escaped:
+                break
+            if char == '\\':
+                escaped = not escaped
+            else:
+                escaped = False
             cur += 1
+
+        if cur >= end:
+            self.cur = end
+            raise Exception(f'ritobin: Error: Unterminated string at {self.human_cur()}')
+
         right = cur
-        cur += 1
-        self.cur = cur
+        self.cur = cur + 1
         return clean_escapes(text[left:right])
 
     def read_hash(self):

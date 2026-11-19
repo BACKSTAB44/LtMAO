@@ -61,28 +61,41 @@ def f32_str(num):
     return decimal_text
 
 def make_escapes(text):
+    """Escape a Python string for a quoted Ritobin text value."""
     escape_chars = {
+        '\\': '\\\\',
         '\n': '\\n',
         '\t': '\\t',
         '\r': '\\r',
         "'": "\\'",
         '"': '\\"',
     }
-    for escape_char, made_escape_char in escape_chars.items():
-        text = text.replace(escape_char, made_escape_char)
-    return text
+    return ''.join(escape_chars.get(char, char) for char in text)
+
 
 def clean_escapes(text):
+    """Decode the simple escape sequences emitted by make_escapes()."""
     escape_chars = {
-        '\n': '\\n',
-        '\t': '\\t',
-        '\r': '\\r',
-        "'": "\\'",
-        '"': '\\"',
+        'n': '\n',
+        't': '\t',
+        'r': '\r',
+        "'": "'",
+        '"': '"',
+        '\\': '\\',
     }
-    for escape_char, made_escape_char in escape_chars.items():
-        text = text.replace(made_escape_char, escape_char)
-    return text
+    result = []
+    index = 0
+    while index < len(text):
+        if text[index] == '\\' and index + 1 < len(text):
+            replacement = escape_chars.get(text[index + 1])
+            if replacement is not None:
+                result.append(replacement)
+                index += 2
+                continue
+        result.append(text[index])
+        index += 1
+    return ''.join(result)
+
 
 def add_indent(indent):
     return indent * 4 * ' '
@@ -116,7 +129,7 @@ def clean_type(bin_type, value=None):
 def hash_or_raw(name, quote=True):
     if pyRitoFile.bin.BINHasher.is_hash(name):
         return f'0x{name.lower()}'
-    return f'"{name}"' if quote else name
+    return f'"{make_escapes(name)}"' if quote else name
 
 
 def _is_zero_pointer_hash(value):
@@ -213,12 +226,24 @@ class Reader:
         self.read_exact(quote)
         text, cur, end = self.text, self.cur, self.end
         left = cur
-        while cur < end and text[cur] != quote or (text[cur] == quote and text[cur-1] == '\\'):
-            cur += 1
-        right = cur
-        cur += 1
-        self.cur = cur
-        return clean_escapes(text[left:right])
+
+        # A quote closes the string only when preceded by an even number of
+        # consecutive backslashes. Skip escape pairs so a trailing \\ does
+        # not cause the closing quote to be mistaken for escaped content.
+        while cur < end:
+            if text[cur] == '\\':
+                cur += 2
+            elif text[cur] == quote:
+                break
+            else:
+                cur += 1
+
+        if cur >= end:
+            self.cur = end
+            raise Exception(f'ritobin: Error: Unterminated quoted string at {self.human_cur()}')
+
+        self.cur = cur + 1
+        return clean_escapes(text[left:cur])
 
     def read_hash(self):
         return self.read_quote() if self.text[self.cur] == '"' else self.read_non_quote().removeprefix('0x')
@@ -588,7 +613,7 @@ class Writer:
         if len(self.bin.links) > 0:
             text += '\n'
             for link in self.bin.links:
-                text += f'{add_indent(indent+1)}"{link}"\n'
+                text += f'{add_indent(indent+1)}"{make_escapes(link)}"\n'
             text += f'{add_indent(indent)}}}\n'
         else:
             text += '}\n'
@@ -739,7 +764,7 @@ class Writer:
     
     def write_patch(self, patch, indent):
         text = f'{add_indent(indent)}{hash_or_raw(patch.hash)} = patch {{\n'
-        text += f'{add_indent(indent+1)}path: string = "{patch.path}"\n'
+        text += f'{add_indent(indent+1)}path: string = "{make_escapes(patch.path)}"\n'
         text += f'{add_indent(indent+1)}value: '
         if patch.type in (pyRitoFile.bin.BINType.LIST, pyRitoFile.bin.BINType.LIST2):
             field = patch.data

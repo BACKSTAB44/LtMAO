@@ -191,8 +191,9 @@ class WWiseConsole:
         return p
     
 class RITOBIN:
-    # LeagueToolkit ritobin-tools v0.2.3 replaces the older ritobin_cli.exe.
-    # v0.2.3 supports 8-byte BIN Hash values and the legacy .py text extension.
+    # LeagueToolkit ritobin-tools v0.2.4 replaces the older ritobin_cli.exe.
+    # v0.2.4 supports 8-byte BIN Hash values, the legacy .py text extension,
+    # and null-pointer text from Moonshadow and Ritoshark converters.
     local_file = './res/tools/ritobin-tools.exe'
 
     @staticmethod
@@ -527,7 +528,7 @@ class RITOBIN:
                     # Keep the useful part of miette/rust diagnostics instead of
                     # reducing the error to its final box-drawing border.
                     detail_lines = detail_text.splitlines()
-                    detail = '\\n'.join(detail_lines[-12:])
+                    detail = '\n'.join(detail_lines[-12:])
                     if len(detail) > 2400:
                         detail = detail[-2400:]
                 else:

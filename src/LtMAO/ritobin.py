@@ -161,7 +161,7 @@ def clean_type(bin_type, value=None):
 def hash_or_raw(name, quote=True):
     if pyRitoFile.bin.BINHasher.is_hash(name):
         return f'0x{name.lower()}'
-    return f'"{name}"' if quote else name
+    return f'"{make_escapes(str(name))}"' if quote else name
 
 
 def _is_zero_pointer_hash(value):
@@ -646,7 +646,7 @@ class Writer:
         if len(self.bin.links) > 0:
             text += '\n'
             for link in self.bin.links:
-                text += f'{add_indent(indent+1)}"{link}"\n'
+                text += f'{add_indent(indent+1)}"{make_escapes(link)}"\n'
             text += f'{add_indent(indent)}}}\n'
         else:
             text += '}\n'
@@ -797,7 +797,7 @@ class Writer:
     
     def write_patch(self, patch, indent):
         text = f'{add_indent(indent)}{hash_or_raw(patch.hash)} = patch {{\n'
-        text += f'{add_indent(indent+1)}path: string = "{patch.path}"\n'
+        text += f'{add_indent(indent+1)}path: string = "{make_escapes(patch.path)}"\n'
         text += f'{add_indent(indent+1)}value: '
         if patch.type in (pyRitoFile.bin.BINType.LIST, pyRitoFile.bin.BINType.LIST2):
             field = patch.data

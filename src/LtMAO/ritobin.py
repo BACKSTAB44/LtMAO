@@ -118,6 +118,14 @@ def hash_or_raw(name, quote=True):
         return f'0x{name.lower()}'
     return f'"{name}"' if quote else name
 
+
+def _is_zero_pointer_hash(value):
+    """Return True when a pointer class hash is any zero-valued hexadecimal spelling."""
+    raw = str(value).strip()
+    if raw.lower().startswith('0x'):
+        raw = raw[2:]
+    return bool(raw) and all(char in '0123456789abcdefABCDEF' for char in raw) and int(raw, 16) == 0
+
 def make_types(str_type):
     """Parse nested Ritobin types; hash width/algorithm are metadata, not BIN kinds."""
     str_type = str_type.strip().replace(' ', '')
@@ -293,7 +301,10 @@ class Reader:
     def read_pointer_or_embed(self):
         field = pyRitoFile.bin.BINField()
         field.hash_type = self.read_non_quote()
-        if field.hash_type == 'null':
+
+        # Different converters spell a null pointer as either "null" or "Null".
+        # Accept both (and other casing) without confusing quoted string values.
+        if field.hash_type.lower() == 'null':
             field.hash_type = '00000000'
             field.data = None
         else:
@@ -307,6 +318,14 @@ class Reader:
                     break
                 else:
                     field.data.append(self.read_field())
+
+            # Explicit zero-class blocks (0x0 {}, 0x00000000 {}) are the same
+            # null pointer in BIN data. Canonicalize them so the binary writer
+            # does not append a struct payload after a zero pointer hash.
+            if _is_zero_pointer_hash(field.hash_type):
+                field.hash_type = '00000000'
+                field.data = None
+
         return field
 
     def read_option(self, value_type):
@@ -584,7 +603,7 @@ class Writer:
             return text
         elif value_type in (pyRitoFile.bin.BINType.EMBED, pyRitoFile.bin.BINType.POINTER):
             if value.hash_type == '00000000':
-                text = f'{add_indent(0 if inline else indent)}null'
+                text = f'{add_indent(0 if inline else indent)}0x0 {{}}'
             else:
                 text = f'{add_indent(0 if inline else indent)}{hash_or_raw(value.hash_type, quote=False)} {{'
                 if value.data != None and len(value.data) > 0:
@@ -627,7 +646,7 @@ class Writer:
     
     def write_pointer_or_embed(self, field, indent):
         if field.hash_type == '00000000':
-            text = f'{add_indent(indent)}{hash_or_raw(field.hash, quote=False)}: {clean_type(field.type)} = null\n'
+            text = f'{add_indent(indent)}{hash_or_raw(field.hash, quote=False)}: {clean_type(field.type)} = 0x0 {{}}\n'
         else:
             text = f'{add_indent(indent)}{hash_or_raw(field.hash, quote=False)}: {clean_type(field.type)} = {hash_or_raw(field.hash_type, quote=False)} {{'
             if field.data != None and len(field.data) > 0:
@@ -756,7 +775,7 @@ class Writer:
         elif patch.type in (pyRitoFile.bin.BINType.POINTER, pyRitoFile.bin.BINType.EMBED):
             field = patch.data
             if field.hash_type == '00000000':
-                text += f'{add_indent(0)}{clean_type(patch.type)} = null\n'
+                text += f'{add_indent(0)}{clean_type(patch.type)} = 0x0 {{}}\n'
             else:
                 text += f'{add_indent(0)}{clean_type(patch.type)} = {hash_or_raw(field.hash_type, quote=False)} {{'
                 if field.data != None and len(field.data) > 0:

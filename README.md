@@ -6,7 +6,7 @@
 3. Run `start.bat`
 
 # Updates
-1. LtMAO-hai always check for latest version when you open the app. If there is a newer version, the app will display update message in title bar.
+1. LtMAO always checks for latest version when you open the app. If there is a newer version, the app will display update message in title bar.
 2. To fully update: re-download the whole app from github and extract it to same location.
 3. To lazily update LtMAO: press "Redownload LtMAO" button from setting page. This is not recommended but if it works, it works.
 
@@ -19,7 +19,7 @@
 2. Desktop shortcut: Can be created in setting tab.
 
 ## Theme
-You can create your custom theme by making a new folder in `LtMAO-hai/res/themes`.
+You can create your custom theme by making a new folder in `LtMAO-ritobin-update/res/themes`.
 
 Your custom image sizes must be same ratio as original images.
 

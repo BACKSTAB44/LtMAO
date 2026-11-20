@@ -3057,8 +3057,8 @@ def build_setting(widget: QWidget):
                 return str(size >> ((max(size.bit_length()-1, 0)//10)*10)) + ["", " KB", " MB", " GB", " TB", " PB", " EB"][max(size.bit_length()-1, 0)//10]
             
             import requests
-            local_file = './LtMAO-hai.zip'
-            remote_file = 'https://codeload.github.com/tarngaina/LtMAO/zip/refs/heads/hai'
+            local_file = './LtMAO-ritobin-update.zip'
+            remote_file = 'https://codeload.github.com/BACKSTAB44/LtMAO/zip/refs/heads/ritobin-update'
             # GET request
             get = requests.get(remote_file, stream=True)
             get.raise_for_status()
@@ -3082,7 +3082,7 @@ def build_setting(widget: QWidget):
             import zipfile
             with zipfile.ZipFile(local_file, 'r') as zip:
                 for zipinfo in zip.infolist():
-                    zipinfo.filename = zipinfo.filename.replace('LtMAO-hai/', '')
+                    zipinfo.filename = zipinfo.filename.replace('LtMAO-ritobin-update/', '')
                     try:
                         zip.extract(zipinfo, '.')
                     except Exception as e:

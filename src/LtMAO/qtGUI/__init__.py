@@ -231,10 +231,10 @@ def check_version(label):
         local_file = './version'
         with open(local_file, 'r', encoding='utf-8') as f:
             VERSION = f.read()
-        title = f'LtMAO-hai V{VERSION}'
+        title = f'LtMAO-ritobin-update V{VERSION}'
         label.setText(title)
         # read online
-        remote_file = 'https://raw.githubusercontent.com/tarngaina/LtMAO/hai/version'
+        remote_file = 'https://raw.githubusercontent.com/BACKSTAB44/LtMAO/ritobin-update/version'
         get = requests.get(remote_file)
         get.raise_for_status()
         NEW_VERSION = get.text
@@ -250,7 +250,7 @@ def sync_changelog(changelog):
     local_file = './pref/changelog.txt'
     try:
         # read online
-        url=f'https://api.github.com/repos/tarngaina/ltmao/commits?sha=hai&per_page=100'
+        url=f'https://api.github.com/repos/BACKSTAB44/LtMAO/commits?sha=ritobin-update&per_page=100'
         commits=requests.get(url).json()
         for commit in commits:
             commit = commit['commit']
@@ -511,7 +511,7 @@ def build_title_bar(widget: QWidget, layout: QBoxLayout):
     layout.addWidget(icon_label, stretch=3)
 
     # icon
-    qtwidgets.title_label = title_label = QLabel('LtMAO-hai')
+    qtwidgets.title_label = title_label = QLabel('LtMAO-ritobin-update')
     title_label.setStyleSheet('background-color: rgba(0, 0, 0, 127)')
     layout.addWidget(title_label, stretch=100)
 
